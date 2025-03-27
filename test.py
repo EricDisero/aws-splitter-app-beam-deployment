@@ -18,6 +18,48 @@ autoscaler = QueueDepthAutoscaler(
   max_containers=5
 )
 
+def convert_to_44100hz(input_file, output_file=None):
+    """
+    Convert any audio file to 44.1kHz sample rate using soundfile
+
+    Args:
+        input_file (str): Path to input audio file
+        output_file (str, optional): Path to output file. If None, creates a new file.
+
+    Returns:
+        str: Path to the converted file
+    """
+    try:
+        # Check if file needs conversion
+        info = sf.info(input_file)
+
+        # If already 44.1kHz, just return the original file path
+        if abs(info.samplerate - 44100) < 100:  # Allow small tolerance
+            print(f"File {input_file} already at 44.1kHz, skipping conversion")
+            return input_file
+
+        if output_file is None:
+            # Create new file in same directory
+            dir_name = os.path.dirname(input_file)
+            base_name = os.path.basename(input_file)
+            output_file = os.path.join(dir_name, f"44k_{base_name}")
+
+        print(f"Converting {input_file} from {info.samplerate}Hz to 44.1kHz")
+
+        # Read the audio data
+        data, samplerate = sf.read(input_file)
+
+        # Write with new samplerate (soundfile does the resampling automatically)
+        sf.write(output_file, data, 44100, subtype='PCM_24')
+
+        print(f"Successfully converted to {output_file}")
+        return output_file
+
+    except Exception as e:
+        print(f"Error converting sample rate: {str(e)}")
+        # Return original file if conversion fails
+        return input_file
+
 def invert_phase_and_mix(input_file_path, stems_files, output_file_path):
     """
     Inverts the phase of summed stems and mixes them with the original input file.
@@ -127,23 +169,32 @@ def split_audio(uploaded_file_name) -> str:
     input_file_path = os.path.join(media_path, uploaded_file_name)
     final_output_dir = os.path.join(current_dir, "downloads", f"{uploaded_file_name}-Stems")
 
-
-    #Check output already exists
+    # Check output already exists
     try:
         os.makedirs(final_output_dir)
     except FileExistsError:
-        pass     
+        pass
 
+        # First convert to 44.1kHz if needed
+    try:
+        print(f"Checking sample rate of {input_file_path}")
+        converted_input_path = convert_to_44100hz(input_file_path)
+        print(f"Using file {converted_input_path} for processing")
+    except Exception as e:
+        print(f"Error during sample rate conversion: {str(e)}")
+        # Fall back to original file
+        converted_input_path = input_file_path
 
     temp_dir_path = Path(tempfile.mkdtemp(dir=final_output_dir))
-    temp_input_file = os.path.join(temp_dir_path, f"{uploaded_file_name}_temp.wav")
-    adjust_volume_and_save(input_file_path, -10, temp_input_file)
-    print(temp_input_file)
+    temp_input_file = os.path.join(temp_dir_path, f"{os.path.basename(converted_input_path)}_temp.wav")
 
+    # Adjust volume on the converted file
+    adjust_volume_and_save(converted_input_path, -10, temp_input_file)
+    print(temp_input_file)
 
     # Run your subprocess command here
     demucs.separate.main(["--float32", "-d", "cuda", "--out", str(temp_dir_path), str(temp_input_file)])
-    
+
     # Simulating the work done by the thread
     print(f"Processing {temp_input_file} in {temp_dir_path}")
 
