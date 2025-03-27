@@ -60,9 +60,11 @@ def convert_to_44100hz(input_file, output_file=None):
         # Return original file if conversion fails
         return input_file
 
+
 def invert_phase_and_mix(input_file_path, stems_files, output_file_path):
     """
     Inverts the phase of summed stems and mixes them with the original input file.
+    Handles potential size mismatches between original and processed files.
     """
     # Read the original input file
     original_data, samplerate = sf.read(input_file_path)
@@ -80,25 +82,31 @@ def invert_phase_and_mix(input_file_path, stems_files, output_file_path):
     # Invert phase of the summed stems
     inverted_stems_data = summed_stems_data * -1
 
-    # check to make sure shapes match
+    # Check for shape mismatch and handle it
+    if original_data.shape != inverted_stems_data.shape:
+        print(f"Shape mismatch detected: original={original_data.shape}, stems={inverted_stems_data.shape}")
 
+        # Option 1: Resize to the smaller of the two lengths
+        min_length = min(original_data.shape[0], inverted_stems_data.shape[0])
+        original_data = original_data[:min_length]
+        inverted_stems_data = inverted_stems_data[:min_length]
+        print(f"Resized both arrays to length {min_length}")
 
-    error_occured = False
     # Mix inverted phase stems with the original track
     try:
         mixed_data = original_data + inverted_stems_data
         # Write the result to the output file
         sf.write(output_file_path, mixed_data, samplerate, subtype='FLOAT')
         print(f"Mixed and saved EE track to {output_file_path}")
-        error_occured = False
-    except ValueError:
-        print(stems_files)
-        print(inverted_stems_data.shape)
-        print(original_data.shape)
-        error_occured = True
+        error_occurred = False
+    except ValueError as e:
+        print(f"Error mixing audio: {str(e)}")
+        print(f"Stems files: {stems_files}")
+        print(f"Inverted stems shape: {inverted_stems_data.shape}")
+        print(f"Original data shape: {original_data.shape}")
+        error_occurred = True
 
-    
-    return error_occured
+    return error_occurred
 
 
 def adjust_volume_and_save(input_file, db_change, output_file):
@@ -199,7 +207,7 @@ def split_audio(uploaded_file_name) -> str:
     print(f"Processing {temp_input_file} in {temp_dir_path}")
 
     # Call the callback function if it exists
-    start_next_function(uploaded_file_name, input_file_path, temp_dir_path, final_output_dir)
+    start_next_function(uploaded_file_name, converted_input_path, temp_dir_path, final_output_dir)
 
     print("Finished")
 
