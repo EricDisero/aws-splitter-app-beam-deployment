@@ -234,7 +234,8 @@ def serialize_zip_file(zip_file_path):
     autoscaler=autoscaler,
     cpu=1,
     memory="8Gi",
-    gpu="T4",
+    gpu="RTX4090",  # Changed from "T4" to "RTX_4090"
+    keep_warm_seconds=0,  # ✅ Shut down container immediately after task finishes
     secrets=['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
     image=Image(
         python_version="python3.9",
