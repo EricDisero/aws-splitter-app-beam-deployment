@@ -12,11 +12,14 @@ import shutil
 import demucs.separate
 import boto3
 import io
+import concurrent.futures
+import time
 
 autoscaler = QueueDepthAutoscaler(
-  tasks_per_container=1,
-  max_containers=5
+    tasks_per_container=1,
+    max_containers=5
 )
+
 
 def convert_to_44100hz(input_file, output_file=None):
     """
@@ -117,61 +120,82 @@ def adjust_volume_and_save(input_file, db_change, output_file):
     print(f"Audio volume adjusted by {db_change}dB and saved to {output_file} in 32-bit float format.")
 
 
+def upload_stem_to_s3(s3_client, stem_path, bucket_name, s3_key):
+    """Upload a single stem file to S3 concurrently"""
+    try:
+        with open(stem_path, 'rb') as f:
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Body=f.read()
+            )
+
+        print(f"Uploaded {os.path.basename(stem_path)} to S3 at {s3_key}")
+        return {
+            "file_name": os.path.basename(stem_path),
+            "s3_key": s3_key,
+            "success": True
+        }
+    except Exception as e:
+        print(f"Error uploading {stem_path} to S3: {str(e)}")
+        return {
+            "file_name": os.path.basename(stem_path),
+            "s3_key": s3_key,
+            "success": False,
+            "error": str(e)
+        }
+
+
 def run_additional_function(input_file_name, input_file, temp_dir_path, final_output_dir):
     # This will hold paths to the drums, bass, and vocals stems
-    selected_stems_files = [] 
-        
+    selected_stems_files = []
+    output_stems = []  # Store information about output stems
+
     # Adjusted for loop to append selected stems paths
     for stem_file in temp_dir_path.glob("**/*.wav"):
         stem_type = stem_file.stem.split('_')[-1]
         if "temp" in stem_file.stem:
             continue
-        new_filename = f"{input_file_name} {stem_type.capitalize()}.wav"
+
+        # Use proper naming format
+        # Extract base name without extension
+        base_name = os.path.splitext(input_file_name)[0]
+        new_filename = f"{base_name} {stem_type.capitalize()}.wav"
         new_file_path = Path(final_output_dir) / new_filename
+
         adjust_volume_and_save(stem_file, 10, new_file_path)
+
         if stem_type in ['drums', 'bass', 'vocals']:
-            selected_stems_files.append(new_file_path)      
+            selected_stems_files.append(new_file_path)
+
+        # Add to output stems list (except for "other" which we don't want)
+        if stem_type != 'other':
+            output_stems.append(new_file_path)
 
     # Create "EE" track
-    ee_output_file_path = Path(final_output_dir) / f"{input_file_name} EE.wav"
+    ee_output_file_path = Path(final_output_dir) / f"{base_name} EE.wav"
     invert_phase_and_mix(input_file, selected_stems_files, ee_output_file_path)
+
+    # Add EE track to output stems
+    output_stems.append(ee_output_file_path)
 
     # Additional step: Delete the "other" stem, if it exists
     other_stem_path = Path(final_output_dir) / f"{input_file_name} Other.wav"
     if other_stem_path.exists():
         other_stem_path.unlink()
         print(f"Deleted 'Other' stem: {other_stem_path}")
-    
-
 
     try:
-        # Code that may raise a PermissionError
-        shutil.rmtree(temp_dir_path)  
+        # Remove temp directory to clean up space
+        shutil.rmtree(temp_dir_path)
     except PermissionError as e:
         # Handle PermissionError
-        print("PermissionError:", e)
-        # Optionally, perform error handling actions such as logging, notifying the user, etc.    
+        print("PermissionError during cleanup:", e)
 
-def deserialize_zip_file(json_data):
-    # Extract filename and base64 encoded content from JSON data
-    zip_file_path = json_data['file_name']
-
-    current_dir = "/tmp"
-    media_path = os.path.join(current_dir, 'uploads')
-    if not os.path.exists(media_path):
-        os.makedirs(media_path)
-    input_file_path = os.path.join(media_path, zip_file_path)
-    base64_encoded_content = json_data['base64_encoded_content']
-
-    # Decode the base64 encoded content
-    decoded_content = base64.b64decode(base64_encoded_content)
-
-    # Write the decoded content to a new file
-    with open(input_file_path, 'wb') as f:
-        f.write(decoded_content)
+    return output_stems
 
 
-def split_audio(uploaded_file_name) -> str:
+def split_audio(uploaded_file_name) -> list:
     current_dir = "/tmp"
     media_path = os.path.join(current_dir, 'uploads')
     input_file_path = os.path.join(media_path, uploaded_file_name)
@@ -183,7 +207,7 @@ def split_audio(uploaded_file_name) -> str:
     except FileExistsError:
         pass
 
-        # First convert to 44.1kHz if needed
+    # First convert to 44.1kHz if needed
     try:
         print(f"Checking sample rate of {input_file_path}")
         converted_input_path = convert_to_44100hz(input_file_path)
@@ -207,35 +231,26 @@ def split_audio(uploaded_file_name) -> str:
     print(f"Processing {temp_input_file} in {temp_dir_path}")
 
     # Call the callback function if it exists
-    start_next_function(uploaded_file_name, converted_input_path, temp_dir_path, final_output_dir)
+    output_stems = start_next_function(uploaded_file_name, converted_input_path, temp_dir_path, final_output_dir)
 
     print("Finished")
 
-    return final_output_dir
+    return output_stems
+
 
 def start_next_function(input_file_name, input_file, temp_dir_path, final_output_dir):
     print("Next function started")
-    run_additional_function(input_file_name, input_file, temp_dir_path, final_output_dir)
+    output_stems = run_additional_function(input_file_name, input_file, temp_dir_path, final_output_dir)
+    return output_stems
 
-
-def serialize_zip_file(zip_file_path):
-
-    base64_zip_contents = base64.b64encode(zip_file_path).decode('utf-8')
-
-    json_data = {
-        'zip_file_name': 'zip_file_name',
-        'base64_encoded_content': base64_zip_contents
-    }
-
-    return json_data
 
 @endpoint(
     name="demucs-analysis",
     autoscaler=autoscaler,
     cpu=1,
     memory="8Gi",
-    gpu="A100-40",  # Changed from "T4" to "RTX_4090 to A100-40"
-    keep_warm_seconds=0,  # ✅ Shut down container immediately after task finishes
+    gpu="A10G",  # Using A100-40 GPU
+    keep_warm_seconds=0,  # Shut down container immediately after task finishes
     secrets=['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
     image=Image(
         python_version="python3.9",
@@ -273,55 +288,82 @@ def serialize_zip_file(zip_file_path):
             "typing_extensions",
             "tzdata",
             "boto3"
-        ],  # You can also add a path to a requirements.txt instead
+        ],
     ),
 )
 def predict(**inputs):
-
+    start_time = time.time()
     file_name = inputs['file_name']
-    
+
     current_dir = "/tmp"
     media_path = os.path.join(current_dir, 'uploads')
     if not os.path.exists(media_path):
         os.makedirs(media_path)
     input_file_path = os.path.join(media_path, file_name)
 
+    # Initialize S3 client
     session = boto3.Session(
-                aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
-                aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY']
-            )
+        aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
+        aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY']
+    )
     s3 = session.client('s3')
 
+    # Download the input file from S3
     s3.download_file('us-audio-bucket-2', file_name, input_file_path)
-
     s3.delete_object(Bucket='us-audio-bucket-2', Key=file_name)
 
-    processed_files_path = split_audio(uploaded_file_name=file_name)
+    # Process the audio file and get the output stem paths
+    output_stem_paths = split_audio(uploaded_file_name=file_name)
 
-    print(processed_files_path)
-
-    files = os.listdir(processed_files_path)
+    # Get base name without extension
     name, extension = os.path.splitext(file_name)
-    
-    # Create a BytesIO buffer
-    buffer = io.BytesIO()
-    
-    with zipfile.ZipFile(buffer, 'w') as zip_file:
-        for file_name in files:
-            print(file_name)
-            file_path = os.path.join(processed_files_path, file_name)
-            zip_file.write(file_path, arcname=file_name)
 
-    buffer.seek(0)
+    # Upload stem files to S3 concurrently for better performance
+    stem_files_info = []
+    s3_keys = []
+    upload_tasks = []
 
-    s3.put_object(Bucket='us-audio-bucket-2', Key=f"{name}.zip", Body=buffer.getvalue())
+    # Prepare upload tasks
+    for stem_path in output_stem_paths:
+        stem_path = Path(stem_path)  # Ensure it's a Path object
+        stem_filename = stem_path.name
 
+        # Create a key with the pattern {original_filename}/{stem_filename}
+        s3_key = f"{name}/{stem_filename}"
+        s3_keys.append(s3_key)
 
+        # Add to upload tasks list
+        upload_tasks.append((stem_path, s3_key))
+
+    # Use ThreadPoolExecutor to upload files concurrently
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        # Start all upload tasks
+        futures = [
+            executor.submit(upload_stem_to_s3, s3, str(stem_path), 'us-audio-bucket-2', s3_key)
+            for stem_path, s3_key in upload_tasks
+        ]
+
+        # Wait for all uploads to complete and collect results
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result["success"]:
+                stem_files_info.append({
+                    "file_name": result["file_name"],
+                    "s3_key": result["s3_key"]
+                })
+            else:
+                print(f"Warning: Failed to upload {result['file_name']}: {result.get('error', 'Unknown error')}")
+
+    # Calculate total time
+    end_time = time.time()
+    print(f"Total processing and upload time: {end_time - start_time:.2f} seconds")
+
+    # Return information about the stem files
     json_data = {
-            'file_name': f"{name}.zip",
-        }
+        'base_name': name,
+        'stem_files': stem_files_info
+    }
 
-    print('Finished')
+    print(f'Finished uploading all {len(stem_files_info)} stem files to S3')
 
     return json_data
-
